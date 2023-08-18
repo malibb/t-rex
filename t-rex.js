@@ -124,14 +124,47 @@ document.addEventListener("DOMContentLoaded", function () {
     let memory = [];
     const numStateFeatures = 2; // distance to the next obstacle and height of the obstacle
     const numActions = 2; // jump or do nothing
+    
+    const learningRate = 0.001;
 
-    const model = tf.sequential();
-    model.add(tf.layers.dense({ inputShape: [numStateFeatures], units: 64, activation: 'relu' }));
-    model.add(tf.layers.dense({ units: 32, activation: 'relu' }));
-    model.add(tf.layers.dense({ units: numActions, activation: 'linear' }));
-    model.compile({ optimizer: tf.train.adam(0.001), loss: 'meanSquaredError' });
+
+    const actorModel = tf.sequential();
+    actorModel.add(tf.layers.dense({ inputShape: [numStateFeatures], units: 64, activation: 'relu' }));
+    actorModel.add(tf.layers.dense({ units: 32, activation: 'relu' }));
+    actorModel.add(tf.layers.dense({ units: numActions, activation: 'softmax' }));  // Use softmax activation to output probabilities
+    actorModel.compile({ optimizer: tf.train.adam(learningRate), loss: 'categoricalCrossentropy' });
+
+    const criticModel = tf.sequential();
+    criticModel.add(tf.layers.dense({ inputShape: [numStateFeatures], units: 64, activation: 'relu' }));
+    criticModel.add(tf.layers.dense({ units: 32, activation: 'relu' }));
+    criticModel.add(tf.layers.dense({ units: 1, activation: 'linear' }));  // Use linear activation to output values
+    criticModel.compile({ optimizer: tf.train.adam(learningRate), loss: 'meanSquaredError' });
+
+    /* 
+        const model = tf.sequential();
+        model.add(tf.layers.dense({ inputShape: [numStateFeatures], units: 64, activation: 'relu' }));
+        model.add(tf.layers.dense({ units: 32, activation: 'relu' }));
+        model.add(tf.layers.dense({ units: numActions, activation: 'linear' }));
+        model.compile({ optimizer: tf.train.adam(0.001), loss: 'meanSquaredError' }); */
 
     function gameLoop() {
+        const state = getState();
+        const action = chooseAction(state);
+        applyAction(action);
+
+        const reward = getReward();
+        const nextState = getState();
+        const done = isGameOver();
+        addToMemory(state, action, reward, nextState, done);
+
+        if (!done) {
+            trainModel(state, action, reward, nextState);
+        }
+
+        stepCount++;
+    }
+
+    /* function gameLoop() {
         const state = getState();
         const epsilon = getEpsilon(stepCount);
         const action = chooseAction(state, epsilon);
@@ -149,7 +182,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         stepCount++;
     }
-
+ */
     function getState() {
         // Implement your state representation here
         // For example, use the distance to the next obstacle and the height of the obstacle as state features
@@ -180,9 +213,16 @@ document.addEventListener("DOMContentLoaded", function () {
             memory.shift();
         }
     }
-    let isModelTraining = false;
 
-    async function trainModel() {
+
+
+    function getEpsilon(stepCount) {
+        return Math.max(epsilonEnd, epsilonStart - (epsilonStart - epsilonEnd) * stepCount / epsilonDecaySteps);
+    }
+
+    /*
+    let isModelTraining = false;
+        async function trainModel() {
         if (memory.length < batchSize || isModelTraining) {
             return;
         }
@@ -230,21 +270,50 @@ document.addEventListener("DOMContentLoaded", function () {
         } finally {
             isModelTraining = false;
         }
-    }
+    } */
 
-    function getEpsilon(stepCount) {
-        return Math.max(epsilonEnd, epsilonStart - (epsilonStart - epsilonEnd) * stepCount / epsilonDecaySteps);
-    }
-
-    function chooseAction(state, epsilon) {
+    /* function chooseAction(state, epsilon) {
         if (Math.random() < epsilon) {
             return Math.floor(Math.random() * numActions);
         } else {
             const qValues = model.predict(tf.tensor([state]));
             return tf.argMax(qValues, 1).dataSync()[0];
         }
+    } */
+
+    function chooseAction(state) {
+        const actionProbs = actorModel.predict(tf.tensor([state]));
+        const action = tf.multinomial(actionProbs, 1).dataSync()[0];
+        return action;
     }
 
+    function getAdvantage(reward, state, nextState) {
+        const nextValue = criticModel.predict(tf.tensor([nextState]));
+        const currentValue = criticModel.predict(tf.tensor([state]));
+        const advantage = reward + discountFactor * nextValue - currentValue;
+        return advantage;
+    }
+
+    async function trainModel(state, action, reward, nextState) {
+        const advantage = getAdvantage(reward, state, nextState);
+        const targetValue = tf.tensor([reward + discountFactor * criticModel.predict(tf.tensor([nextState])).dataSync()[0]]);
+        const actionProbs = actorModel.predict(tf.tensor([state]));
+        const actionOneHot = tf.oneHot(action, numActions);
+    
+        // Ensure that the optimizer is using the variables of the actor model
+        optimizer.minimize(() => {
+            const actorLoss = actionProbs.mul(actionOneHot).log().mul(advantage).mean();
+            return actorLoss;
+        }, false, actorModel.trainableVariables);
+    
+        // Ensure that the optimizer is using the variables of the critic model
+        optimizer.minimize(() => {
+            const predictedValue = criticModel.predict(tf.tensor([state]));
+            const criticLoss = tf.losses.meanSquaredError(targetValue, predictedValue);
+            return criticLoss;
+        }, false, criticModel.trainableVariables);
+    }
+    
     function applyAction(action) {
         console.log(action);
         switch (action) {
